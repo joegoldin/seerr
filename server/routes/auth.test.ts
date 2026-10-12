@@ -18,6 +18,7 @@ import { LinkedAccount } from '@server/entity/LinkedAccount';
 import { User } from '@server/entity/User';
 import PreparedEmail from '@server/lib/email';
 import ImageProxy from '@server/lib/imageproxy';
+import { Permission } from '@server/lib/permissions';
 import { getSettings } from '@server/lib/settings';
 import { checkUser } from '@server/middleware/auth';
 import { setupTestDb } from '@server/test/db';
@@ -1239,6 +1240,66 @@ describe('OpenID Connect', () => {
         where: { provider: 'test', sub: DEFAULT_CLAIMS.sub },
       });
       assert.notStrictEqual(createdLink, null);
+    });
+
+    it('grants ADMIN to a new user in an admin group', async function () {
+      fetchMock.hardReset();
+
+      const settings = getSettings();
+      settings.oidc.providers[0].newUserLogin = true;
+      settings.oidc.providers[0].adminGroups = 'jellyfin-admins';
+
+      const claims = {
+        sub: 'admin-user-sub',
+        email: 'adminuser@example.com',
+        groups: ['jellyfin-admins'],
+      };
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        idTokenClaims: claims,
+        userinfoResponse: claims,
+      });
+
+      const response = await performOidcCallback();
+
+      assert.strictEqual(response.status, 204);
+
+      const createdUser = await getRepository(User).findOne({
+        where: { email: claims.email },
+      });
+      assert.notStrictEqual(createdUser, null);
+      assert.ok(createdUser!.hasPermission(Permission.ADMIN));
+    });
+
+    it('does not grant ADMIN to a new user outside the admin groups', async function () {
+      fetchMock.hardReset();
+
+      const settings = getSettings();
+      settings.oidc.providers[0].newUserLogin = true;
+      settings.oidc.providers[0].adminGroups = 'jellyfin-admins';
+
+      const claims = {
+        sub: 'member-user-sub',
+        email: 'memberuser@example.com',
+        groups: ['jellyfin-users'],
+      };
+
+      await setupFetchMock({
+        supportsPKCE: false,
+        idTokenClaims: claims,
+        userinfoResponse: claims,
+      });
+
+      const response = await performOidcCallback();
+
+      assert.strictEqual(response.status, 204);
+
+      const createdUser = await getRepository(User).findOne({
+        where: { email: claims.email },
+      });
+      assert.notStrictEqual(createdUser, null);
+      assert.ok(!createdUser!.hasPermission(Permission.ADMIN));
     });
 
     it('rejects new user when newUserLogin is disabled', async function () {

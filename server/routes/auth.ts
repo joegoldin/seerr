@@ -1157,6 +1157,21 @@ authRoutes.post(
       });
     }
 
+    // Grant ADMIN to members of the provider's configured admin groups. The
+    // groups claim is only present when the `groups` scope was requested (and
+    // the provider released it), so an empty claim simply means no elevation.
+    const adminGroups = (provider.adminGroups ?? '')
+      .split(' ')
+      .filter((s) => !!s);
+    const groupsClaim = (fullUserInfo as unknown as Record<string, unknown>)[
+      'groups'
+    ];
+    const userGroups = Array.isArray(groupsClaim)
+      ? groupsClaim.filter((g): g is string => typeof g === 'string')
+      : [];
+    const isAdmin =
+      adminGroups.length > 0 && userGroups.some((g) => adminGroups.includes(g));
+
     // Map identifier to linked account
     const userRepository = getRepository(User);
     const linkedAccountsRepository = getRepository(LinkedAccount);
@@ -1201,6 +1216,11 @@ authRoutes.post(
         await linkedAccountsRepository.save(newLinkedAccount);
       }
 
+      if (isAdmin && !req.user.hasPermission(Permission.ADMIN)) {
+        req.user.permissions |= Permission.ADMIN;
+        await userRepository.save(req.user);
+      }
+
       return res.sendStatus(204);
     }
 
@@ -1233,7 +1253,9 @@ authRoutes.post(
         avatar: avatar,
         username: fullUserInfo.preferred_username,
         email: normalizedEmail,
-        permissions: settings.main.defaultPermissions,
+        permissions: isAdmin
+          ? Permission.ADMIN
+          : settings.main.defaultPermissions,
         plexToken: '',
         userType: UserType.LOCAL,
       });
@@ -1261,6 +1283,13 @@ authRoutes.post(
           ? ApiErrorCode.OidcMissingEmail
           : ApiErrorCode.Unauthorized,
       });
+    }
+
+    // Elevate an existing account when it belongs to an admin group. Only ever
+    // grants, never revokes, so a manual admin promotion is not undone.
+    if (isAdmin && !user.hasPermission(Permission.ADMIN)) {
+      user.permissions |= Permission.ADMIN;
+      await userRepository.save(user);
     }
 
     // Set logged in session and return

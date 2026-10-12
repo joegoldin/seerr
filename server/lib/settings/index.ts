@@ -69,6 +69,9 @@ export type OidcProvider = {
   clientSecret: string;
   logo?: string;
   requiredClaims?: string;
+  // Space-separated list of identity-provider groups whose members are
+  // granted the ADMIN permission on login.
+  adminGroups?: string;
   scopes?: string;
   newUserLogin?: boolean;
 };
