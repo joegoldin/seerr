@@ -914,6 +914,65 @@ const getOidcRedirectUrl = (req: Request) => {
   );
 };
 
+/**
+ * Links the Jellyfin account matching an SSO identity so that media-server
+ * features (requests, the Jellyfin Enhanced plugin) work for OIDC users. The
+ * Jellyfin users here carry no email, so match on the username — the Kanidm
+ * `preferred_username` mirrors the Jellyfin username.
+ */
+const linkJellyfinAccountOnOidcLogin = async (
+  user: User,
+  preferredUsername?: string
+): Promise<void> => {
+  const username = preferredUsername?.trim().toLowerCase();
+  if (!username) {
+    return;
+  }
+
+  const settings = getSettings();
+  if (
+    (settings.main.mediaServerType !== MediaServerType.JELLYFIN &&
+      settings.main.mediaServerType !== MediaServerType.EMBY) ||
+    !settings.jellyfin.apiKey ||
+    !settings.jellyfin.ip
+  ) {
+    return;
+  }
+
+  const userRepository = getRepository(User);
+  const admin = await userRepository.findOne({
+    where: { id: 1 },
+    select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
+    order: { id: 'ASC' },
+  });
+
+  const jellyfinClient = new JellyfinAPI(
+    getHostname(),
+    settings.jellyfin.apiKey,
+    admin?.jellyfinDeviceId ?? 'BOT_seerr'
+  );
+  jellyfinClient.setUserId(admin?.jellyfinUserId ?? '');
+
+  const { users } = await jellyfinClient.getUsers();
+  const match = users.find((u) => u.Name?.trim().toLowerCase() === username);
+  if (!match) {
+    return;
+  }
+
+  // Never steal a Jellyfin account that another Seerr user already owns.
+  const existing = await userRepository.findOne({
+    where: { jellyfinUserId: match.Id },
+  });
+  if (existing && existing.id !== user.id) {
+    return;
+  }
+
+  user.jellyfinUserId = match.Id;
+  user.jellyfinUsername = match.Name;
+  user.userType = UserType.JELLYFIN;
+  await userRepository.save(user);
+};
+
 const OIDC_STATE_KEY = 'oidc-state';
 const OIDC_CODE_VERIFIER_KEY = 'oidc-code-verifier';
 
@@ -1290,6 +1349,24 @@ authRoutes.post(
     if (isAdmin && !user.hasPermission(Permission.ADMIN)) {
       user.permissions |= Permission.ADMIN;
       await userRepository.save(user);
+    }
+
+    // Link the matching Jellyfin account so media-server features (requests,
+    // the Jellyfin plugin) work for SSO users. A failure must not block login.
+    if (!user.jellyfinUserId) {
+      try {
+        await linkJellyfinAccountOnOidcLogin(
+          user,
+          fullUserInfo.preferred_username
+        );
+      } catch (error) {
+        logger.warn('Failed to link Jellyfin account on OIDC login', {
+          label: 'Auth',
+          provider: provider.slug,
+          userId: user.id,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
     }
 
     // Set logged in session and return
