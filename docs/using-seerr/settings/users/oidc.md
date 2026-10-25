@@ -75,6 +75,37 @@ Space-separated list of boolean claims that are required to log in
 
 Create accounts for new users logging in with this provider
 
+## Upgrading an Existing OIDC Deployment
+
+Keep the existing provider `slug`, issuer, client credentials, and `config`
+volume. Account links are identified by provider slug and OIDC subject, not by
+email. The `AddLinkedAccounts1742858484395` SQLite migration is unchanged, so an
+installation that has already applied it retains its existing links.
+
+The callback URLs remain `/login` and `/profile/settings/linked-accounts`. When
+`main.applicationUrl` is empty, the callback origin comes from the request. A
+TLS-terminating reverse proxy must preserve the public Host and forwarded
+protocol. Existing OIDC users can still sign in with `main.localLogin` disabled.
+
+This branch also includes two extensions from notpeelz:
+
+- `adminGroups`: an optional space-separated list of provider group names. A
+  matching string in the OIDC `groups` claim grants Seerr ADMIN permission.
+  With this setting absent, group claims do not change permissions. This only
+  grants permissions; removing group membership does not revoke an existing
+  promotion. Configure this only for groups managed by trusted administrators.
+- Jellyfin linking: an OIDC user without a Jellyfin link is matched against
+  Jellyfin usernames using `preferred_username`, ignoring case and surrounding
+  whitespace. Existing links are preserved, accounts owned by another Seerr
+  user are not reassigned, and a Jellyfin API failure does not block OIDC login.
+  Only use this with an identity provider whose usernames you trust to identify
+  the corresponding Jellyfin accounts.
+
+Back up the config volume before upgrading. Test login with the existing
+provider before removing the previous image. Automated tests cover proxy
+callback generation and existing account preservation; they do not replace a
+browser login against your identity provider.
+
 ## Provider Setup
 
 Most OpenID Connect providers follow the same basic setup pattern:

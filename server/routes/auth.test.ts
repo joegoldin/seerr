@@ -1209,6 +1209,123 @@ describe('OpenID Connect', () => {
     });
   });
 
+  describe('existing OIDC deployment compatibility', () => {
+    afterEach(() => {
+      fetchMock.hardReset();
+      app.set('trust proxy', false);
+    });
+
+    it('keeps the public callback URL behind a TLS proxy with no applicationUrl', async () => {
+      await setupFetchMock({ supportsPKCE: true });
+      const settings = getSettings();
+      settings.main.applicationUrl = '';
+      settings.main.localLogin = false;
+      settings.oidc.providers[0].slug = 'authentik';
+      settings.oidc.providers[0].scopes = 'openid profile email groups';
+      app.set('trust proxy', true);
+
+      const response = await request(app)
+        .get('/auth/oidc/login/authentik')
+        .set('Host', 'requests.example.com')
+        .set('X-Forwarded-Proto', 'https');
+
+      assert.strictEqual(response.status, 200);
+      const redirect = new URL(response.body.redirectUrl);
+      assert.strictEqual(
+        redirect.searchParams.get('redirect_uri'),
+        'https://requests.example.com/login'
+      );
+      assert.strictEqual(
+        redirect.searchParams.get('scope'),
+        'openid profile email groups'
+      );
+      assert.ok(response.get('Set-Cookie')?.every((c) => c.includes('Secure')));
+    });
+
+    it('preserves existing linked Jellyfin users with local login disabled', async () => {
+      const userRepo = getRepository(User);
+      const user = await userRepo.findOneOrFail({
+        where: { email: 'demo@seerr.dev' },
+      });
+      user.jellyfinUserId = 'existing-jellyfin-account';
+      user.jellyfinUsername = 'existing-jellyfin-user';
+      user.userType = UserType.JELLYFIN;
+      await userRepo.save(user);
+      const permissions = user.permissions;
+      await getRepository(LinkedAccount).save(
+        new LinkedAccount({
+          user,
+          provider: 'test',
+          sub: EXISTING_USER_CLAIMS.sub,
+          username: 'friend',
+        })
+      );
+      getSettings().main.localLogin = false;
+      getSettings().oidc.providers[0].newUserLogin = false;
+      await setupFetchMock({
+        idTokenClaims: EXISTING_USER_CLAIMS,
+        userinfoResponse: { ...EXISTING_USER_CLAIMS, groups: ['admins'] },
+      });
+
+      const response = await performOidcCallback();
+
+      assert.strictEqual(response.status, 204);
+      const updated = await userRepo.findOneOrFail({
+        where: { id: user.id },
+        select: [
+          'id',
+          'jellyfinUserId',
+          'jellyfinUsername',
+          'userType',
+          'permissions',
+        ],
+      });
+      assert.strictEqual(updated.jellyfinUserId, 'existing-jellyfin-account');
+      assert.strictEqual(updated.jellyfinUsername, 'existing-jellyfin-user');
+      assert.strictEqual(updated.userType, UserType.JELLYFIN);
+      assert.strictEqual(updated.permissions, permissions);
+      assert.strictEqual(await getRepository(LinkedAccount).count(), 1);
+    });
+
+    it('does not grant group-based admin access unless adminGroups is configured', async () => {
+      const claims = { ...DEFAULT_CLAIMS, groups: ['admins'] };
+      await setupFetchMock({ idTokenClaims: claims, userinfoResponse: claims });
+
+      const response = await performOidcCallback();
+
+      assert.strictEqual(response.status, 204);
+      const user = await getRepository(User).findOneOrFail({
+        where: { email: DEFAULT_CLAIMS.email },
+      });
+      assert.strictEqual(
+        user.permissions,
+        getSettings().main.defaultPermissions
+      );
+      assert.ok(!user.hasPermission(Permission.ADMIN));
+    });
+
+    it('does not block OIDC login when optional Jellyfin account linking fails', async () => {
+      configureJellyfin();
+      getSettings().jellyfin.apiKey = 'test-api-key';
+      const claims = { ...DEFAULT_CLAIMS, preferred_username: 'newuser' };
+      await setupFetchMock({ idTokenClaims: claims, userinfoResponse: claims });
+      const getUsers = mock.method(
+        JellyfinAPI.prototype,
+        'getUsers',
+        async () => {
+          throw new Error('Jellyfin unavailable');
+        }
+      );
+      try {
+        const response = await performOidcCallback();
+        assert.strictEqual(response.status, 204);
+        assert.strictEqual(getUsers.mock.callCount(), 1);
+      } finally {
+        getUsers.mock.restore();
+      }
+    });
+  });
+
   describe('new user registration', function () {
     before(async () => {
       await setupFetchMock({ supportsPKCE: false });
